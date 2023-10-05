@@ -69,9 +69,9 @@ jobs:
       - name: Set up NDK
         run: python build.py -v ndk
 
-      - name: Build debug
+      - name: Build Release
         run: |
-          python build.py -v all
+          python build.py -vr all
 
       # Only upload artifacts built on Linux
       - name: Upload build artifact
