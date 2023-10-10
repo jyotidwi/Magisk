@@ -8,14 +8,17 @@
 
 using namespace std;
 
+bool logging_muted = false;
+
 #undef vsnprintf
 static int fmt_and_log_with_rs(LogLevel level, const char *fmt, va_list ap) {
+    if (logging_muted) return 0;
     constexpr int sz = 4096;
     char buf[sz];
     buf[0] = '\0';
     // Fortify logs when a fatal error occurs. Do not run through fortify again
     int len = std::min(__call_bypassing_fortify(vsnprintf)(buf, sz, fmt, ap), sz - 1);
-    log_with_rs(level, byte_view(buf, len + 1));
+    log_with_rs(level, byte_view(buf, len));
     return len;
 }
 

@@ -102,8 +102,15 @@ void setfilecon_at(int dirfd, const char *name, const char *con) {
     lsetfilecon(path, con);
 }
 
+static bool se_state = false;
+bool selinux_enabled() {
+    return se_state;
+}
+
 void enable_selinux() {
-    rust::enable_selinux();
+    if (access(SELINUX_MNT, F_OK) != 0)
+        return;
+    se_state = true;
     setcon = __setcon;
     getfilecon = __getfilecon;
     lgetfilecon = __lgetfilecon;

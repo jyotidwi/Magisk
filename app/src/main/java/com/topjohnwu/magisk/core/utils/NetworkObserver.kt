@@ -14,10 +14,14 @@ import androidx.core.content.getSystemService
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
-import com.topjohnwu.magisk.core.Info
 import com.topjohnwu.magisk.core.ktx.registerRuntimeReceiver
 
-class NetworkObserver(context: Context): DefaultLifecycleObserver {
+typealias ConnectionCallback = (Boolean) -> Unit
+
+class NetworkObserver(
+    context: Context,
+    private val callback: ConnectionCallback
+): DefaultLifecycleObserver {
     private val manager = context.getSystemService<ConnectivityManager>()!!
 
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
@@ -25,11 +29,11 @@ class NetworkObserver(context: Context): DefaultLifecycleObserver {
 
         override fun onAvailable(network: Network) {
             activeList.add(network)
-            postValue(true)
+            callback(true)
         }
         override fun onLost(network: Network) {
             activeList.remove(network)
-            postValue(!activeList.isEmpty())
+            callback(!activeList.isEmpty())
         }
     }
 
@@ -41,7 +45,7 @@ class NetworkObserver(context: Context): DefaultLifecycleObserver {
         }
         override fun onReceive(context: Context, intent: Intent) {
             if (context.isIdleMode()) {
-                postValue(false)
+                callback(false)
             } else {
                 postCurrentState()
             }
@@ -63,18 +67,13 @@ class NetworkObserver(context: Context): DefaultLifecycleObserver {
     }
 
     private fun postCurrentState() {
-        postValue(manager.getNetworkCapabilities(manager.activeNetwork)
+        callback(manager.getNetworkCapabilities(manager.activeNetwork)
             ?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) ?: false)
     }
 
-    private fun postValue(b: Boolean) {
-        Info.remote = Info.EMPTY_REMOTE
-        Info.isConnected.postValue(b)
-    }
-
     companion object {
-        fun init(context: Context): NetworkObserver {
-            return NetworkObserver(context).apply { postCurrentState() }
+        fun observe(context: Context, callback: ConnectionCallback): NetworkObserver {
+            return NetworkObserver(context, callback).apply { postCurrentState() }
         }
     }
 }

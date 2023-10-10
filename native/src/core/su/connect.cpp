@@ -135,15 +135,7 @@ static void exec_cmd(const char *action, vector<Extra> &data,
     char user[4];
     ssprintf(user, sizeof(user), "%d", to_user_id(info->eval_uid));
 
-    if (zygisk_enabled) {
-#if defined(__LP64__)
-        ssprintf(exe, sizeof(exe), "/proc/self/fd/%d", app_process_64);
-#else
-        ssprintf(exe, sizeof(exe), "/proc/self/fd/%d", app_process_32);
-#endif
-    } else {
-        strscpy(exe, "/system/bin/app_process", sizeof(exe));
-    }
+    strscpy(exe, "/system/bin/app_process", sizeof(exe));
 
     // First try content provider call method
     if (provider) {
@@ -215,7 +207,7 @@ void app_notify(const su_context &ctx) {
 int app_request(const su_context &ctx) {
     // Create FIFO
     char fifo[64];
-    ssprintf(fifo, sizeof(fifo), "%s/" INTLROOT "/su_request_%d", MAGISKTMP.data(), ctx.pid);
+    ssprintf(fifo, sizeof(fifo), "/dev/magisk_%s_su_request_%d", MAIN_SOCKET, ctx.pid);
     mkfifo(fifo, 0600);
     chown(fifo, ctx.info->mgr_uid, ctx.info->mgr_uid);
     setfilecon(fifo, MAGISK_FILE_CON);

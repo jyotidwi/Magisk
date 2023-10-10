@@ -154,13 +154,24 @@ static void mount_preinit_dir(string preinit_dev) {
     if (mounted || mount(PREINITDEV, PREINITMNT, "ext4", MS_RDONLY, nullptr) == 0 ||
         mount(PREINITDEV, PREINITMNT, "f2fs", MS_RDONLY, nullptr) == 0) {
         string preinit_dir = resolve_preinit_dir(PREINITMNT);
+        string early_mnt_dir = resolve_early_mount_dir(PREINITMNT);
         // Create bind mount
-        xmkdirs(PREINITMIRR, 0);
+        xmkdirs(EARLYMNTRO, 0);
         if (access(preinit_dir.data(), F_OK)) {
             LOGW("empty preinit: %s\n", preinit_dir.data());
         } else {
             LOGD("preinit: %s\n", preinit_dir.data());
             xmount(preinit_dir.data(), PREINITMIRR, nullptr, MS_BIND, nullptr);
+        }
+         if (access(early_mnt_dir.data(), F_OK)) {
+            LOGW("empty mount dir: %s\n", early_mnt_dir.data());
+        } else {
+            // Copy mount files to tmpfs and bind mount it to original partitions
+            // We cannot mount files directly from PREINITMNT as it will cause
+            // preinit partition unable to mount when boot
+            LOGD("early mount: %s\n", early_mnt_dir.data());
+            xmount(EARLYMNTNAME, EARLYMNTRO, "tmpfs", 0, nullptr);
+            cp_afc(early_mnt_dir.data(), EARLYMNTRO);
         }
         xumount2(PREINITMNT, MNT_DETACH);
     } else {
@@ -261,6 +272,59 @@ void BaseInit::prepare_data() {
     cp_afc("/overlay.d", "/data/overlay.d");
 }
 
+static bool is_symlink(const char *path){
+    struct stat st; return lstat(path, &st) == 0 && S_ISLNK(st.st_mode);
+}
+
+static void simple_mount(const string &sdir, const string &ddir = "") {
+    auto dir = xopen_dir(sdir.data());
+    if (!dir) return;
+    for (dirent *entry; (entry = xreaddir(dir.get()));) {
+        string src = sdir + "/" + entry->d_name;
+        string dest = ddir + "/" + entry->d_name;
+        if (access(dest.data(), F_OK) == 0 && !is_symlink(dest.data())) {
+        	if (entry->d_type == DT_LNK) continue;
+            else if (entry->d_type == DT_DIR) {
+                // Recursive
+                simple_mount(src, dest);
+            } else {
+                LOGD("bind_mnt: %s <- %s\n", dest.data(), src.data());
+                xmount(src.data(), dest.data(), nullptr, MS_BIND, nullptr);
+            }
+        }
+    }
+}
+
+static void early_mount() {
+    // preinit modules
+    if (auto dir = xopen_dir(PREINITMIRR)) {
+        for (dirent *entry; (entry = xreaddir(dir.get()));) {
+            auto name = PREINITMIRR "/"s + entry->d_name;
+            auto emnt = name + "/early-mount";
+            if (xaccess(emnt.data(), R_OK) == 0 &&
+                access((name + "/disable").data(), F_OK) != 0 &&
+                access((name + "/remove").data(), F_OK) != 0) {
+                // Copy mount files to tmpfs and bind mount it to original partitions
+                // We cannot mount files directly from PREINITMIRR as it will cause
+                // preinit partition unable to mount when boot
+                LOGD("Loading custom early mount patch: [%s]\n", emnt.data());
+                cp_afc(emnt.data(), EARLYMNTRO);
+            }
+        }
+    }
+    xmount(nullptr, EARLYMNTRO, nullptr, MS_RDONLY | MS_REMOUNT, nullptr);
+
+    // TODO: support magic mount
+    if (access(EARLYMNTRO "/system", F_OK) == 0)
+        simple_mount(EARLYMNTRO "/system", "/system");
+#define EARLY_MNT(part) \
+    if (access(EARLYMNTRO "/system/" part, F_OK) == 0 && !is_symlink("/" part)) \
+        simple_mount(EARLYMNTRO "/system/" part, "/" part);
+    EARLY_MNT("vendor")
+    EARLY_MNT("product")
+    EARLY_MNT("system_ext")
+}
+
 void MagiskInit::setup_tmp(const char *path) {
     LOGD("Setup Magisk tmp at %s\n", path);
     chdir("/data");
@@ -271,8 +335,9 @@ void MagiskInit::setup_tmp(const char *path) {
     xmkdir(WORKERDIR, 0);
 
     mount_preinit_dir(preinit_dev);
+    early_mount();
 
-    cp_afc(".backup/.magisk", MAIN_CONFIG);
+    cp_afc(".backup/.magisk", INTLROOT "/config");
     rm_rf(".backup");
 
     // Create applet symlinks
@@ -281,6 +346,7 @@ void MagiskInit::setup_tmp(const char *path) {
     xsymlink("./magiskpolicy", "supolicy");
 
     xmount(".", path, nullptr, MS_BIND, nullptr);
+    xmount(EARLYMNTRO, (string(path) + "/" EARLYMNTRO).data(), nullptr, MS_BIND, nullptr);
 
     chdir("/");
 }
