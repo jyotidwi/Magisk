@@ -40,3 +40,9 @@
 [submodule "termux-elf-cleaner"]
 	path = tools/termux-elf-cleaner
 	url = https://github.com/termux/termux-elf-cleaner.git
+[submodule "native/src/external/dtc"]
+	path = native/src/external/dtc
+	url = https://github.com/dgibson/dtc.git
+[submodule "native/src/external/nanopb"]
+	path = native/src/external/nanopb
+	url = https://github.com/nanopb/nanopb.git
