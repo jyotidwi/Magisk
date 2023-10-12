@@ -83,6 +83,10 @@ class SettingsViewModel : BaseViewModel(), BaseSettingsItem.Handler {
                 // Can hide overlay windows on 12.0+
                 list.remove(Tapjack)
             }
+            if (Const.Version.atLeast_24_0()) {
+                // Can disable Magisk
+                list.add(unloadMagisk)
+            } 
         }
 
         return list
