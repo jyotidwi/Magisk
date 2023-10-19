@@ -2,7 +2,7 @@ name: Magisk Build
 
 on:
   push:
-    branches: [build]
+    branches: [master]
     paths:
       - "app/**"
       - "native/**"
@@ -12,7 +12,7 @@ on:
       - "gradle.properties"
       - ".github/workflows/build.yml"
   pull_request:
-    branches: [build]
+    branches: [master]
   workflow_dispatch:
 
 jobs:
@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest ]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - name: Check out
         uses: actions/checkout@v3
@@ -130,5 +130,5 @@ jobs:
 
       - name: AVD test
         run: |
-          brew install coreutils bash
+          brew install coreutils
           scripts/avd_test.sh ${{ matrix.api }}

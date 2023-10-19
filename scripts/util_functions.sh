@@ -279,7 +279,7 @@ mount_ro_ensure() {
 }
 
 # After calling this method, the following variables will be set:
-# SLOT, SYSTEM_AS_ROOT, LEGACYSAR
+# SLOT, SYSTEM_AS_ROOT
 mount_partitions() {
   # Check A/B slot
   SLOT=$(grep_cmdline androidboot.slot_suffix)
@@ -313,27 +313,10 @@ mount_partitions() {
     fi
   fi
   $SYSTEM_AS_ROOT && ui_print "- Device is system-as-root"
-
-  LEGACYSAR=false
-  if $BOOTMODE; then
-    grep ' / ' /proc/mounts | grep -q '/dev/root' && LEGACYSAR=true
-  else
-    # Recovery mode, assume devices that don't use dynamic partitions are legacy SAR
-    local IS_DYNAMIC=false
-    if grep -q 'androidboot.super_partition' /proc/cmdline; then
-      IS_DYNAMIC=true
-    elif [ -n "$(find_block super)" ]; then
-      IS_DYNAMIC=true
-    fi
-    if $SYSTEM_AS_ROOT && ! $IS_DYNAMIC; then
-      LEGACYSAR=true
-      ui_print "- Legacy SAR, force kernel to load rootfs"
-    fi
-  fi
 }
 
 # After calling this method, the following variables will be set:
-# ISENCRYPTED, PATCHVBMETAFLAG,
+# ISENCRYPTED, PATCHVBMETAFLAG, LEGACYSAR,
 # KEEPVERITY, KEEPFORCEENCRYPT, RECOVERYMODE
 get_flags() {
   if grep ' /data ' /proc/mounts | grep -q 'dm-'; then
@@ -351,6 +334,22 @@ get_flags() {
   else
     PATCHVBMETAFLAG=true
     ui_print "- No vbmeta partition, patch vbmeta in boot image"
+  fi
+  LEGACYSAR=false
+  if $BOOTMODE; then
+    grep ' / ' /proc/mounts | grep -q '/dev/root' && LEGACYSAR=true
+  else
+    # Recovery mode, assume devices that don't use dynamic partitions are legacy SAR
+    local IS_DYNAMIC=false
+    if grep -q 'androidboot.super_partition' /proc/cmdline; then
+      IS_DYNAMIC=true
+    elif [ -n "$(find_block super)" ]; then
+      IS_DYNAMIC=true
+    fi
+    if $SYSTEM_AS_ROOT && ! $IS_DYNAMIC; then
+      LEGACYSAR=true
+      ui_print "- Legacy SAR, force kernel to load rootfs"
+    fi
   fi
 
   # Overridable config flags with safe defaults
@@ -526,6 +525,20 @@ check_data() {
   $DATA_DE && set_nvbase "/data/adb"
 }
 
+find_magisk_apk() {
+  local DBAPK
+  local PACKAGE=io.github.huskydg.magisk
+  [ -z $APK ] && APK=/data/app/${PACKAGE}*/base.apk
+  [ -f $APK ] || APK=/data/app/*/${PACKAGE}*/base.apk
+  if [ ! -f $APK ]; then
+    DBAPK=$(magisk --sqlite "SELECT value FROM strings WHERE key='requester'" 2>/dev/null | cut -d= -f2)
+    [ -z $DBAPK ] && DBAPK=$(strings $NVBASE/magisk.db | grep -oE 'requester..*' | cut -c10-)
+    [ -z $DBAPK ] || APK=/data/user_de/0/$DBAPK/dyn/current.apk
+    [ -f $APK ] || [ -z $DBAPK ] || APK=/data/data/$DBAPK/dyn/current.apk
+  fi
+  [ -f $APK ] || ui_print "! Unable to detect Magisk app APK for BootSigner"
+}
+
 run_migrations() {
   local LOCSHA1
   local TARGET
@@ -573,15 +586,18 @@ copy_preinit_files() {
   fi
 
   # Copy all enabled sepolicy.rule
-  for r in $NVBASE/modules*/*/sepolicy.rule; do
-    [ -f "$r" ] || continue
-    local MODDIR=${r%/*}
+  for d in $NVBASE/modules*/*; do
+    r="${d}/sepolicy.rule"
+    e="${d}/early-mount"
+    local MODDIR=$d
+    [ -d $MODDIR ] || continue
     [ -f $MODDIR/disable ] && continue
     [ -f $MODDIR/remove ] && continue
     [ -f $MODDIR/update ] && continue
     local MODNAME=${MODDIR##*/}
-    mkdir -p $PREINITDIR/$MODNAME
-    cp -f $r $PREINITDIR/$MODNAME/sepolicy.rule
+    mkdir -p "$PREINITDIR/$MODNAME"
+    [ -f "$r" ] && cp -f $r $PREINITDIR/$MODNAME/sepolicy.rule
+    [ -d "$e" ] && cp -afc $e $PREINITDIR/$MODNAME/early-mount
   done
 }
 
@@ -710,8 +726,8 @@ install_module() {
   fi
 
   # Copy over custom sepolicy rules
-  if [ -f $MODPATH/sepolicy.rule ]; then
-    ui_print "- Installing custom sepolicy rules"
+  if [ -f $MODPATH/sepolicy.rule ] || [ -d $MODPATH/early-mount ]; then
+    ui_print "- Installing custom sepolicy rules, early-mount files"
     copy_preinit_files
   fi
 
@@ -727,6 +743,53 @@ install_module() {
 
   ui_print "- Done"
 }
+
+# Magisk Delta
+
+is_rootfs(){
+    local root_blkid="$(mountpoint -d /)"
+    if ! $BOOTMODE && [ -d /system_root ] && mountpoint /system_root; then
+        return 1
+    fi
+    mnt_type="$(head -1 /proc/self/mountinfo | awk '{ printf $9 }')"
+    if $BOOTMODE && [ "$mnt_type" == "rootfs" -o "$mnt_type" == "tmpfs" ]; then
+        return 0
+    fi
+    return 1
+}
+
+mkblknode(){
+    local blk_mm="$(mountpoint -d "$2" | sed "s/:/ /g")"
+    mknod "$1" -m 666 b $blk_mm
+}
+
+warn_system_ro(){
+    ui_print "! System partition is read-only"
+    return 1
+}
+
+remount_check(){
+    local mode="$1"
+    local part="$(realpath "$2")"
+    local ignore_not_exist="$3"
+    local i
+    if ! grep -q " $part " /proc/mounts && [ ! -z "$ignore_not_exist" ]; then
+        return "$ignore_not_exist"
+    fi
+    mount -o "$mode,remount" "$part"
+    local IFS=$'\t\n ,'
+    for i in $(cat /proc/mounts | grep " $part " | awk '{ print $4 }'); do
+        test "$i" == "$mode" && return 0
+    done
+    return 1
+}
+
+force_bind_mount(){
+    mount -o bind,private "$1" "$2"
+    mount -o rw,remount "$2"
+    remount_check rw "$2" || warn_system_ro
+}
+
 
 ##########
 # Presets

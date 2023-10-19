@@ -1,12 +1,21 @@
 #include <sys/mount.h>
+#include <stdio.h>
 
 #include <magisk.hpp>
 #include <sepolicy.hpp>
-#include <embed.hpp>
+#include <base.hpp>
 
 #include "init.hpp"
 
 using namespace std;
+
+int patch_sepol(const char *in, const char *out) {
+    auto sepol = unique_ptr<sepolicy>(sepolicy::from_file(in));
+    if (!sepol) return 1;
+    sepol->magisk_rules();
+    if (!sepol->to_file(out)) return 2;
+    return 0;
+}
 
 void MagiskInit::patch_sepolicy(const char *in, const char *out) {
     LOGD("Patching monolithic policy\n");
@@ -38,16 +47,6 @@ void MagiskInit::patch_sepolicy(const char *in, const char *out) {
     }
 }
 
-static void dump_preload() {
-    int fd = xopen("/dev/preload.so", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-    if (fd < 0)
-        return;
-    fd_channel ch(fd);
-    if (!unxz(ch, byte_view(init_ld_xz, sizeof(init_ld_xz))))
-        return;
-    close(fd);
-}
-
 #define MOCK_COMPAT    SELINUXMOCK "/compatible"
 #define MOCK_LOAD      SELINUXMOCK "/load"
 #define MOCK_ENFORCE   SELINUXMOCK "/enforce"
@@ -60,7 +59,7 @@ bool MagiskInit::hijack_sepolicy() {
         // This meant that instead of going through convoluted methods trying to alter
         // and block init's control flow, we can just LD_PRELOAD and replace the
         // security_load_policy function with our own implementation.
-        dump_preload();
+        dump_preload("/dev/preload.so", 0644);
         setenv("LD_PRELOAD", "/dev/preload.so", 1);
     }
 

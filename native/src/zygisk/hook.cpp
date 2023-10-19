@@ -4,12 +4,19 @@
 #include <regex.h>
 #include <bitset>
 #include <list>
+#include <sys/prctl.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <sys/stat.h>
 
 #include <lsplt.hpp>
 
 #include <base.hpp>
 #include <flags.h>
 #include <daemon.hpp>
+#include <magisk.hpp>
+#include <selinux.hpp>
 
 #include "zygisk.hpp"
 #include "memory.hpp"
@@ -41,11 +48,11 @@ enum {
     SERVER_FORK_AND_SPECIALIZE,
     DO_REVERT_UNMOUNT,
     SKIP_FD_SANITIZATION,
+    DO_ALLOW,
+    ALLOWLIST_ENFORCED,
 
     FLAG_MAX
 };
-
-#define MAX_FD_SIZE 1024
 
 // Global variables
 vector<tuple<dev_t, ino_t, const char *, void **>> *plt_hook_list;
@@ -55,13 +62,14 @@ bool should_unmap_zygisk = false;
 
 // Current context
 HookContext *g_ctx;
-bitset<MAX_FD_SIZE> *g_allowed_fds = nullptr;
 const JNINativeInterface *old_functions = nullptr;
 JNINativeInterface *new_functions = nullptr;
 
 #define DCL_PRE_POST(name) \
 void name##_pre();         \
 void name##_post();
+
+#define MAX_FD_SIZE 1024
 
 struct HookContext {
     JNIEnv *env;
@@ -78,6 +86,7 @@ struct HookContext {
     int pid;
     bitset<FLAG_MAX> flags;
     uint32_t info_flags;
+    bitset<MAX_FD_SIZE> allowed_fds;
     vector<int> exempted_fds;
 
     struct RegisterInfo {
@@ -121,7 +130,6 @@ struct HookContext {
     void sanitize_fds();
     bool exempt_fd(int fd);
     bool is_child() const { return pid <= 0; }
-    bool can_exempt_fd() const { return flags[APP_FORK_AND_SPECIALIZE] && args.app->fds_to_ignore; }
 
     // Compatibility shim
     void plt_hook_register(const char *regex, const char *symbol, void *fn, void **backup);
@@ -152,31 +160,79 @@ DCL_HOOK_FUNC(int, fork) {
 
 // Unmount stuffs in the process's private mount namespace
 DCL_HOOK_FUNC(int, unshare, int flags) {
-    int res = old_unshare(flags);
-    if (g_ctx && (flags & CLONE_NEWNS) != 0 && res == 0 &&
-        // For some unknown reason, unmounting app_process in SysUI can break.
-        // This is reproducible on the official AVD running API 26 and 27.
-        // Simply avoid doing any unmounts for SysUI to avoid potential issues.
-        (g_ctx->info_flags & PROCESS_IS_SYS_UI) == 0) {
-        if (g_ctx->flags[DO_REVERT_UNMOUNT]) {
-            revert_unmount();
-        } else {
-            umount2("/system/bin/app_process64", MNT_DETACH);
-            umount2("/system/bin/app_process32", MNT_DETACH);
+    int res;
+    if (g_ctx && (flags & CLONE_NEWNS) != 0) {
+        if (g_ctx->flags[DO_ALLOW]) {
+            flags &= ~CLONE_NEWNS;
+            res = old_unshare(flags);
+            int clone_pid;
+            auto zygote_con = getcurrent();
+            int current_pid = getpid();
+            // switch to permissive context
+            if (setcurrent("u:r:" SEPOL_PROC_DOMAIN ":s0") == -1)
+                ZLOGE("unable to switch selinux context");
+            int pipe_fd[2];
+            if (pipe(pipe_fd) < 0) {
+                ZLOGE("cannot create pipe\n");
+                goto final_way;
+            }
+            clone_pid = fork();
+            if (clone_pid > 0) {
+                int i=0;
+                read(pipe_fd[0], &i, sizeof(i));
+                if (switch_mnt_ns(clone_pid) == 0) {
+                    ZLOGD("switched to root mount namespace PID=[%d]\n", clone_pid);
+                }
+                kill(clone_pid, SIGKILL);
+                waitpid(clone_pid, 0, 0);
+                close(pipe_fd[0]);
+                close(pipe_fd[1]);
+            } else if (clone_pid == 0) {
+                int i=0;
+                prctl(PR_SET_PDEATHSIG, SIGKILL);
+                if (switch_mnt_ns(1) == 0 && old_unshare(CLONE_NEWNS) == 0) {
+                    ZLOGD("created root mount namespace for PID=[%d]\n", current_pid);
+                    xmount("", "/", nullptr, MS_SLAVE | MS_REC, nullptr);
+                } else {
+                    switch_mnt_ns(current_pid);
+                    ZLOGE("unable to create root mount namespace\n");
+                }
+                write(pipe_fd[1], &i, sizeof(i));
+                while (true) pause();
+            } else {
+                ZLOGE("unable to switch to root mount namespace\n");
+            }
+            // restore old context, this should not always be failed
+            if (setcurrent(zygote_con.data()) == -1)
+                ZLOGE("unable to restore selinux context");
+            goto final_way;
         }
+        res = old_unshare(flags);
+        if (res == 0 && 
+             (g_ctx->flags[ALLOWLIST_ENFORCED] == false && g_ctx->flags[DO_REVERT_UNMOUNT])) {
+            revert_unmount();
+        }
+        final_way:
         // Restore errno back to 0
         errno = 0;
+        return res;
     }
-    return res;
+    return old_unshare(flags);
 }
 
-// Sanitize file descriptors to prevent crashing
+// Close logd_fd if necessary to prevent crashing
+// For more info, check comments in zygisk_log_write
 DCL_HOOK_FUNC(void, android_log_close) {
     if (g_ctx == nullptr) {
         // Happens during un-managed fork like nativeForkApp, nativeForkUsap
         get_magiskd().close_log_pipe();
-    } else {
-        g_ctx->sanitize_fds();
+    } else if (!g_ctx->flags[SKIP_FD_SANITIZATION]) {
+        g_ctx->magiskd.close_log_pipe();
+        if (g_ctx->is_child()) {
+            // Switch to plain old android logging because we cannot talk
+            // to magiskd to fetch our log pipe afterwards anyways.
+            android_logging();
+        }
     }
     old_android_log_close();
 }
@@ -406,33 +462,64 @@ int sigmask(int how, int signum) {
     return sigprocmask(how, &set, nullptr);
 }
 
-void HookContext::fork_pre() {
-    if (g_allowed_fds == nullptr) {
-        default_new(g_allowed_fds);
-
-        auto &allowed_fds = *g_allowed_fds;
-        // Record all open fds
-        auto dir = xopen_dir("/proc/self/fd");
-        for (dirent *entry; (entry = xreaddir(dir.get()));) {
-            int fd = parse_int(entry->d_name);
-            if (fd < 0 || fd >= MAX_FD_SIZE) {
-                close(fd);
-                continue;
-            }
-            allowed_fds[fd] = true;
-        }
-        // The dirfd will be closed once out of scope
-        allowed_fds[dirfd(dir.get())] = false;
-        // logd_fd should be handled separately
-        if (int logd_fd = magiskd.get_log_pipe(); logd_fd >= 0) {
-            allowed_fds[logd_fd] = false;
-        }
+void create_zygote_lock(int pid) {
+    int holder_pid = old_fork();
+    if (holder_pid < 0) {
+        ZLOGE("failed to create holder: %s\n", strerror(errno));
     }
+    if (holder_pid != 0) return;
+    prctl(PR_SET_PDEATHSIG, SIGKILL);
+    if (getppid() == 1) exit(1);
+    int fd = zygisk_request(ZygiskRequest::SYSTEM_SERVER_FORKED);
+    do {
+        if (fd < 0) break;
+        write_int(fd, pid);
+        int lock_fd = recv_fd(fd);
+        if (lock_fd < 0) break;
+        ZLOGD("received lock fd in zygote:%d\n", lock_fd);
+        struct flock lock{
+                .l_type = F_RDLCK,
+                .l_whence = SEEK_SET,
+                .l_start = 0,
+                .l_len = 0
+        };
+        if (fcntl(lock_fd, F_SETLK, &lock) < 0) {
+            ZLOGE("failed to set lock in zygote: %s\n", strerror(errno));
+            write_int(fd, 1);
+            break;
+        }
+        write_int(fd, 0);
+        get_magiskd().close_log_pipe();
+        close(fd);
+        setprogname("lockholder");
+        while (true) {
+            pause();
+        }
+    } while (false);
+    close(fd);
+}
 
+void HookContext::fork_pre() {
     // Do our own fork before loading any 3rd party code
     // First block SIGCHLD, unblock after original fork is done
     sigmask(SIG_BLOCK, SIGCHLD);
     pid = old_fork();
+
+    if (pid != 0 || flags[SKIP_FD_SANITIZATION])
+        return;
+
+    // Record all open fds
+    auto dir = xopen_dir("/proc/self/fd");
+    for (dirent *entry; (entry = xreaddir(dir.get()));) {
+        int fd = parse_int(entry->d_name);
+        if (fd < 0 || fd >= MAX_FD_SIZE) {
+            close(fd);
+            continue;
+        }
+        allowed_fds[fd] = true;
+    }
+    // The dirfd should not be allowed
+    allowed_fds[dirfd(dir.get())] = false;
 }
 
 void HookContext::fork_post() {
@@ -444,27 +531,17 @@ void HookContext::sanitize_fds() {
     if (flags[SKIP_FD_SANITIZATION])
         return;
 
-    if (!is_child() || g_allowed_fds == nullptr) {
-        magiskd.close_log_pipe();
-        return;
-    }
-
-    auto &allowed_fds = *g_allowed_fds;
-    if (can_exempt_fd()) {
-        if (int logd_fd = magiskd.get_log_pipe(); logd_fd >= 0) {
-            exempted_fds.push_back(logd_fd);
-        }
-
-        auto update_fd_array = [&](int old_len) -> jintArray {
+    if (flags[APP_FORK_AND_SPECIALIZE] && args.app->fds_to_ignore) {
+        auto update_fd_array = [&](int off) -> jintArray {
             if (exempted_fds.empty())
                 return nullptr;
 
-            jintArray array = env->NewIntArray(static_cast<int>(old_len + exempted_fds.size()));
+            jintArray array = env->NewIntArray(static_cast<int>(off + exempted_fds.size()));
             if (array == nullptr)
                 return nullptr;
 
-            env->SetIntArrayRegion(
-                    array, old_len, static_cast<int>(exempted_fds.size()), exempted_fds.data());
+            env->SetIntArrayRegion(array, off, static_cast<int>(exempted_fds.size()),
+                                   exempted_fds.data());
             for (int fd : exempted_fds) {
                 if (fd >= 0 && fd < MAX_FD_SIZE) {
                     allowed_fds[fd] = true;
@@ -491,11 +568,6 @@ void HookContext::sanitize_fds() {
         } else {
             update_fd_array(0);
         }
-    } else {
-        magiskd.close_log_pipe();
-        // Switch to plain old android logging because we cannot talk
-        // to magiskd to fetch our log pipe afterwards anyways.
-        android_logging();
     }
 
     // Close all forbidden fds to prevent crashing
@@ -503,7 +575,8 @@ void HookContext::sanitize_fds() {
     int dfd = dirfd(dir.get());
     for (dirent *entry; (entry = xreaddir(dir.get()));) {
         int fd = parse_int(entry->d_name);
-        if ((fd < 0 || fd >= MAX_FD_SIZE || !allowed_fds[fd]) && fd != dfd) {
+        int logd_fd = magiskd.get_log_pipe();
+        if ((fd < 0 || fd >= MAX_FD_SIZE || !allowed_fds[fd]) && fd != dfd && fd != logd_fd) {
             close(fd);
         }
     }
@@ -572,10 +645,32 @@ void HookContext::app_specialize_pre() {
         }
         env->ReleaseStringUTFChars(args.app->app_data_dir, app_data_dir);
     }
-    if ((info_flags & UNMOUNT_MASK) == UNMOUNT_MASK) {
-        ZLOGI("[%s] is on the denylist\n", process);
+    if ((info_flags & PROCESS_ON_ALLOWLIST) == PROCESS_ON_ALLOWLIST) {
+        ZLOGI("[%s] is on the allowlist\n", process);
+        flags[DO_ALLOW] = true;
+        // Ensure separated namespace, allow denylist to handle isolated process before Android 11
+        if (args.app->mount_external == 0 /* MOUNT_EXTERNAL_NONE */) {
+            args.app->mount_external = 1 /* MOUNT_EXTERNAL_DEFAULT */;
+        }
+    } else {
+        logging_muted = true;
+    }
+    if ((info_flags & ALLOWLIST_ENFORCING) == ALLOWLIST_ENFORCING) {
+        flags[ALLOWLIST_ENFORCED] = true;
+    } else if ((info_flags & UNMOUNT_MASK) == UNMOUNT_MASK) {
+        ZLOGI("[%s] is on the hidelist\n", process);
+        logging_muted = true;
         flags[DO_REVERT_UNMOUNT] = true;
-    } else if (fd >= 0) {
+        // Ensure separated namespace, allow denylist to handle isolated process before Android 11
+        if (args.app->mount_external == 0 /* MOUNT_EXTERNAL_NONE */) {
+            // Only apply the fix before Android 11, as it can cause undefined behaviour in later versions
+            char sdk_ver_str[92]; // PROPERTY_VALUE_MAX
+            if (__system_property_get("ro.build.version.sdk", sdk_ver_str) && atoi(sdk_ver_str) < 30) {
+                args.app->mount_external = 1 /* MOUNT_EXTERNAL_DEFAULT */;
+            }
+        }
+    }
+    if (fd >= 0) {
         run_modules_pre(module_fds);
     }
     close(fd);
@@ -660,7 +755,7 @@ HookContext::~HookContext() {
 bool HookContext::exempt_fd(int fd) {
     if (flags[POST_SPECIALIZE] || flags[SKIP_FD_SANITIZATION])
         return true;
-    if (!can_exempt_fd())
+    if (!flags[APP_FORK_AND_SPECIALIZE])
         return false;
     exempted_fds.push_back(fd);
     return true;
@@ -688,6 +783,7 @@ void HookContext::nativeForkSystemServer_pre() {
     fork_pre();
     if (is_child()) {
         server_specialize_pre();
+        sanitize_fds();
     }
 }
 
@@ -696,17 +792,32 @@ void HookContext::nativeForkSystemServer_post() {
         ZLOGV("post forkSystemServer\n");
         server_specialize_post();
     }
+    if (pid > 0) {
+        create_zygote_lock(pid);
+    }
     fork_post();
 }
 
 void HookContext::nativeForkAndSpecialize_pre() {
     process = env->GetStringUTFChars(args.app->nice_name, nullptr);
     ZLOGV("pre  forkAndSpecialize [%s]\n", process);
+
     flags[APP_FORK_AND_SPECIALIZE] = true;
+    if (args.app->fds_to_ignore == nullptr) {
+        // if fds_to_ignore does not exist and there's no FileDescriptorTable::Create,
+        // we can skip fd sanitization
+        flags[SKIP_FD_SANITIZATION] = !dlsym(RTLD_DEFAULT, "_ZN19FileDescriptorTable6CreateEv");
+    } else {
+        int logd_fd = magiskd.get_log_pipe();
+        if (logd_fd >= 0) {
+            exempted_fds.push_back(logd_fd);
+        }
+    }
 
     fork_pre();
     if (is_child()) {
         app_specialize_pre();
+        sanitize_fds();
     }
 }
 

@@ -8,7 +8,6 @@ import android.os.Bundle
 import com.topjohnwu.magisk.StubApk
 import com.topjohnwu.magisk.core.di.ServiceLocator
 import com.topjohnwu.magisk.core.utils.DispatcherExecutor
-import com.topjohnwu.magisk.core.utils.NetworkObserver
 import com.topjohnwu.magisk.core.utils.ProcessLifecycle
 import com.topjohnwu.magisk.core.utils.RootUtils
 import com.topjohnwu.magisk.core.utils.ShellInit
@@ -83,7 +82,6 @@ open class App() : Application() {
     override fun onCreate() {
         super.onCreate()
         ProcessLifecycle.init(this)
-        NetworkObserver.init(this)
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {

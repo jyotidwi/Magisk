@@ -1,16 +1,20 @@
 // Functions in this file are only for exporting to C++, DO NOT USE IN RUST
 
 use std::ffi::CStr;
+use std::fmt::Write;
 use std::os::unix::io::RawFd;
 use std::ptr;
 
+use cfg_if::cfg_if;
 use libc::{
     c_char, c_uint, c_ulong, c_void, dev_t, mode_t, nfds_t, off_t, pollfd, sockaddr, socklen_t,
     ssize_t, SYS_dup3,
 };
 
-use crate::cxx_extern::readlinkat_for_cxx;
-use crate::{cstr, errno, raw_cstr, CxxResultExt, FsPath, Utf8CStr, Utf8CStrBufRef};
+use crate::{
+    cstr, errno, mkdirs, raw_cstr, readlink_unsafe, realpath, slice_from_ptr_mut, ResultExt,
+    Utf8CStr,
+};
 
 fn ptr_to_str<'a, T>(ptr: *const T) -> &'a str {
     if ptr.is_null() {
@@ -64,29 +68,20 @@ mod c_export {
 #[no_mangle]
 unsafe extern "C" fn xrealpath(path: *const c_char, buf: *mut u8, bufsz: usize) -> isize {
     match Utf8CStr::from_ptr(path) {
-        Ok(p) => {
-            let mut buf = Utf8CStrBufRef::from_ptr(buf, bufsz);
-            FsPath::from(p)
-                .realpath(&mut buf)
-                .log_cxx_with_msg(|w| w.write_fmt(format_args!("realpath {} failed", p)))
-                .map_or(-1, |_| buf.len() as isize)
-        }
+        Ok(p) => realpath(p, slice_from_ptr_mut(buf, bufsz))
+            .log_cxx_with_msg(|w| w.write_fmt(format_args!("realpath {} failed", p)))
+            .map_or(-1, |v| v as isize),
         Err(_) => -1,
     }
 }
 
 #[no_mangle]
 unsafe extern "C" fn xreadlink(path: *const c_char, buf: *mut u8, bufsz: usize) -> isize {
-    match Utf8CStr::from_ptr(path) {
-        Ok(p) => {
-            let mut buf = Utf8CStrBufRef::from_ptr(buf, bufsz);
-            FsPath::from(p)
-                .read_link(&mut buf)
-                .log_cxx_with_msg(|w| w.write_fmt(format_args!("readlink {} failed", p)))
-                .map_or(-1, |_| buf.len() as isize)
-        }
-        Err(_) => -1,
+    let r = readlink_unsafe(path, buf, bufsz);
+    if r < 0 {
+        perror!("readlink");
     }
+    r
 }
 
 #[no_mangle]
@@ -96,9 +91,23 @@ unsafe extern "C" fn xreadlinkat(
     buf: *mut u8,
     bufsz: usize,
 ) -> isize {
-    let r = readlinkat_for_cxx(dirfd, path, buf, bufsz);
-    if r < 0 {
-        perror!("readlinkat {}", ptr_to_str(path))
+    // readlinkat() may fail on x86 platform, returning random value
+    // instead of number of bytes placed in buf (length of link)
+    cfg_if! {
+        if #[cfg(any(target_arch = "x86", target_arch = "x86_64"))] {
+            libc::memset(buf.cast(), 0, bufsz);
+            let r = libc::readlinkat(dirfd, path, buf.cast(), bufsz - 1);
+            if r < 0 {
+                perror!("readlinkat {}", ptr_to_str(path))
+            }
+        } else {
+            let r = libc::readlinkat(dirfd, path, buf.cast(), bufsz - 1);
+            if r < 0 {
+                perror!("readlinkat {}", ptr_to_str(path))
+            } else {
+                *buf.offset(r) = b'\0';
+            }
+        }
     }
     r
 }
@@ -557,8 +566,7 @@ unsafe extern "C" fn xmkdir(path: *const c_char, mode: mode_t) -> i32 {
 #[no_mangle]
 unsafe extern "C" fn xmkdirs(path: *const c_char, mode: mode_t) -> i32 {
     match Utf8CStr::from_ptr(path) {
-        Ok(p) => FsPath::from(p)
-            .mkdirs(mode)
+        Ok(p) => mkdirs(p, mode)
             .log_cxx_with_msg(|w| w.write_fmt(format_args!("mkdirs {} failed", p)))
             .map_or(-1, |_| 0),
         Err(_) => -1,

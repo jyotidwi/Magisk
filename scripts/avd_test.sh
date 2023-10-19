@@ -5,7 +5,6 @@ avd="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/avdmanager"
 sdk="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
 emu_args='-no-window -gpu swiftshader_indirect -read-only -no-snapshot -noaudio -no-boot-anim -show-kernel'
 boot_timeout=300
-emu_pid=
 
 # Should be either 'google_apis' or 'default'
 type='google_apis'
@@ -31,30 +30,12 @@ cleanup() {
   "$avd" delete avd -n test
   pkill -INT -P $$
   wait
-  trap - EXIT
-  exit 1
-}
-
-wait_for_bootanim() {
-  adb wait-for-device
-  while true; do
-    local result="$(adb exec-out getprop init.svc.bootanim)"
-    if [ $? -ne 0 ]; then
-      exit 1
-    elif [ "$result" = "stopped" ]; then
-      break
-    fi
-    sleep 2
-  done
 }
 
 wait_for_boot() {
   adb wait-for-device
   while true; do
-    local result="$(adb exec-out getprop sys.boot_completed)"
-    if [ $? -ne 0 ]; then
-      exit 1
-    elif [ "$result" = "1" ]; then
+    if [ "stopped" = "$(adb exec-out getprop init.svc.bootanim)" ]; then
       break
     fi
     sleep 2
@@ -77,20 +58,8 @@ restore_avd() {
   fi
 }
 
-test_emu() {
-  "$emu" @test $emu_args &
-  emu_pid=$!
-  timeout $boot_timeout bash -c wait_for_boot &
-  local wait_pid=$!
-
-  # Handle the case when emulator dies with error
-  wait -n $emu_pid $wait_pid
-
-  adb shell magisk -v
-}
-
-
 run_test() {
+  local pid
   local api=$1
 
   set_api_env $api
@@ -100,34 +69,31 @@ run_test() {
   "$sdk" $pkg
   echo no | "$avd" create avd -f -n test -k $pkg
 
-  # Launch stock emulator
+  # Launch emulator and patch
   restore_avd
   "$emu" @test $emu_args &
-  emu_pid=$!
-  timeout $boot_timeout bash -c wait_for_bootanim
+  pid=$!
+  timeout $boot_timeout bash -c wait_for_boot
 
-  # Patch and test debug build
   ./build.py avd_patch -s "$ramdisk"
-  kill -INT $emu_pid
-  wait $emu_pid
-  test_emu
+  kill -INT $pid
+  wait $pid
 
-  # Re-patch and test release build
-  ./build.py -r avd_patch -s "$ramdisk"
-  kill -INT $emu_pid
-  wait $emu_pid
-  test_emu
+  # Test if it boots properly
+  "$emu" @test $emu_args &
+  pid=$!
+  timeout $boot_timeout bash -c wait_for_boot
 
-  # Cleanup
-  kill -INT $emu_pid
-  wait $emu_pid
+  adb shell magisk -v
+  kill -INT $pid
+  wait $pid
+
   restore_avd
 }
 
 trap cleanup EXIT
 
 export -f wait_for_boot
-export -f wait_for_bootanim
 
 set -xe
 
