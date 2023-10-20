@@ -73,13 +73,6 @@ jobs:
           name: ${{ github.sha }}
           path: out
 
-      - name: Upload mapping and native debug symbols
-        if: runner.os == 'Linux'
-        uses: actions/upload-artifact@v3
-        with:
-          name: ${{ github.sha }}-symbols
-          path: app/build/outputs
-
       - name: Download build artifacts
         uses: actions/download-artifact@v3
         with:
