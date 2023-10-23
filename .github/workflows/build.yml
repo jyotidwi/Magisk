@@ -1,7 +1,6 @@
 name: Magisk Building latest
 
 on:
-  push:
   workflow_dispatch
 
 jobs:
