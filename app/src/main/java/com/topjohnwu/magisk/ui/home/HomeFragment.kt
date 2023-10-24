@@ -28,15 +28,8 @@ class HomeFragment : BaseFragment<FragmentHomeMd2Binding>(), MenuProvider {
         DownloadService.observeProgress(this, viewModel::onProgressUpdate)
     }
 
-    private fun checkTitle(text: TextView, icon: ImageView) {
+    private fun checkTitle(text: TextView) {
         text.post {
-            if (text.layout?.getEllipsisCount(0) != 0) {
-                with (icon) {
-                    layoutParams.width = 0
-                    layoutParams.height = 0
-                    requestLayout()
-                }
-            }
         }
     }
 
@@ -49,10 +42,10 @@ class HomeFragment : BaseFragment<FragmentHomeMd2Binding>(), MenuProvider {
 
         // If titles are squished, hide icons
         with(binding.homeMagiskWrapper) {
-            checkTitle(homeMagiskTitle, homeMagiskIcon)
+            checkTitle(homeMagiskTitle)
         }
         with(binding.homeManagerWrapper) {
-            checkTitle(homeManagerTitle, homeManagerIcon)
+            checkTitle(homeManagerTitle)
         }
 
         return binding.root

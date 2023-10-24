@@ -19,6 +19,9 @@
             gone="@{viewModel.loading}"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
+            android:paddingLeft="@dimen/l_50"
+            android:paddingRight="@dimen/l_50"
+            android:scrollbars="none"
             android:clipToPadding="false"
             android:fillViewport="true">
 
@@ -32,6 +35,7 @@
                 android:orientation="vertical"
                 android:paddingTop="@dimen/internal_action_bar_size"
                 android:paddingBottom="@dimen/internal_action_bar_size"
+                android:textColor="?attr/colorOnSurface"
                 app:fitsSystemWindowsInsets="top|bottom"
                 app:layoutManager="androidx.recyclerview.widget.LinearLayoutManager"
                 tools:listitem="@layout/item_log_textview"

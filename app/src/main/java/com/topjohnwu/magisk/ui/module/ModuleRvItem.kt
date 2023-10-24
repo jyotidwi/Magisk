@@ -13,10 +13,6 @@ import com.topjohnwu.magisk.databinding.set
 import com.topjohnwu.magisk.utils.TextHolder
 import com.topjohnwu.magisk.utils.asText
 
-object InstallModule : RvItem(), DiffItem<InstallModule> {
-    override val layoutRes = R.layout.item_module_download
-}
-
 class LocalModuleRvItem(
     override val item: LocalModule
 ) : ObservableRvItem(), DiffItem<LocalModuleRvItem>, ItemWrapper<LocalModule> {

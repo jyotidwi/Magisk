@@ -42,9 +42,9 @@ class SettingsViewModel : BaseViewModel(), BaseSettingsItem.Handler {
 
         // Customization
         val list = mutableListOf(
-            Customization,
             Theme, Language
         )
+        list.remove(Theme)
         if (isRunningAsStub && ShortcutManagerCompat.isRequestPinShortcutSupported(context))
             list.add(AddShortcut)
 
@@ -93,7 +93,7 @@ class SettingsViewModel : BaseViewModel(), BaseSettingsItem.Handler {
             DownloadPath -> withExternalRW(andThen)
             UpdateChecker -> withPostNotificationPermission(andThen)
             Authentication -> AuthEvent(andThen).publish()
-            Theme -> SettingsFragmentDirections.actionSettingsFragmentToThemeFragment().navigate()
+//          Theme -> SettingsFragmentDirections.actionSettingsFragmentToThemeFragment().navigate()
             DenyListConfig -> SettingsFragmentDirections.actionSettingsFragmentToDenyFragment().navigate()
             SystemlessHosts -> createHosts()
             Hide, Restore -> withInstallPermission(andThen)

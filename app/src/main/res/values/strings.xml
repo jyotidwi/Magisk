@@ -52,6 +52,8 @@
 
     <!--Superuser-->
     <string name="su_request_title">Superuser Request</string>
+    <string name="su_request_string1">Allow&#160;</string>
+    <string name="su_request_string2">&#160;to get SuperUser privileges?</string>
     <string name="touch_filtered_warning">Because an app is obscuring a Superuser request, Magisk can\'t verify your response</string>
     <string name="deny">Deny</string>
     <string name="prompt">Prompt</string>
@@ -245,7 +247,7 @@
     <string name="restore_app_confirmation">This will restore the hidden app back to the original app. Do you really want to do this?</string>
 
     <!--Additional Changes-->
-    <string name="reboot_core_only" />
-    <string name="settings_unload_magisk_title" />
-
+    <string name="reboot_core_only">Reboot to core-only mode</string>
+    <string name="settings_unload_magisk_title">Disable Magisk</string>
+    
 </resources>
