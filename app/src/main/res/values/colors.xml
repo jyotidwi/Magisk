@@ -6,8 +6,6 @@
     <color name="su_request_background">#e0e0e0</color>
     <color name="icon_accent">@android:color/system_accent2_700</color>
     <color name="icon_accent_bg">@android:color/system_accent1_100</color>
-    <color name="icon_accent">@android:color/system_accent2_700</color>
-    <color name="icon_accent_bg">@android:color/system_accent1_100</color>
     <color name="splash_background">?android:colorBackground</color>
     <color name="switch_state_on">@android:color/system_accent1_100</color>
     <color name="switch_state_off">@android:color/system_accent2_100</color>
