@@ -13,7 +13,7 @@
 
     <!--endregion-->
 
-    <style name="Foundation.PopupMenu" parent="Material3.TextInputLayout.FilledBox.ExposedDropdownMenu">
+    <style name="Foundation.PopupMenu" parent="Widget.Material3.TextInputLayout.FilledBox.ExposedDropdownMenu">
         <item name="android:itemTextAppearance">@style/AppearanceFoundation.Caption</item>
         <item name="android:textStyle">bold</item>
     </style>

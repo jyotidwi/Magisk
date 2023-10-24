@@ -53,9 +53,9 @@
         <item name="cardElevation">@dimen/l2</item>
     </style>
 
-    <style name="WidgetFoundation.Card.Elevated" parent="WidgetFoundation.Card.Elevated.V21"/>
+    <style name="WidgetFoundation.Card.Elevated" parent="WidgetFoundation.Card.Elevated.V23"/>
 
-    <style name="WidgetFoundation.Card.Elevated.Dialog" parent="WidgetFoundation.Card.Elevated.V21">
+    <style name="WidgetFoundation.Card.Elevated.Dialog" parent="WidgetFoundation.Card.Elevated.V23">
         <item name="android:colorBackground">?colorSurfaceVariant</item>
         <item name="backgroundTint">?colorSurfaceVariant</item>
         <item name="tint">?colorSurfaceVariant</item>
