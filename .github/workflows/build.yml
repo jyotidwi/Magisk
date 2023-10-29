@@ -1,8 +1,8 @@
-name: Magisk Build
+name: Magisk Delta Build
 
 on:
   push:
-    branches: [master]
+    branches: [try]
     paths:
       - "app/**"
       - "native/**"
@@ -12,7 +12,7 @@ on:
       - "gradle.properties"
       - ".github/workflows/build.yml"
   pull_request:
-    branches: [master]
+    branches: [try]
   workflow_dispatch:
 
 jobs:
@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-13]
+        os: [ubuntu-latest ]
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -88,41 +88,3 @@ jobs:
         with:
           name: ${{ github.sha }}
           path: out
-
-      - name: Upload mapping and native debug symbols
-        if: runner.os == 'Linux'
-        uses: actions/upload-artifact@v3
-        with:
-          name: ${{ github.sha }}-symbols
-          path: app/build/outputs
-
-  test:
-    name: Test on ${{ matrix.api }}
-    runs-on: macos-13
-    needs: build
-    strategy:
-      fail-fast: false
-      matrix:
-        api: [23, 26, 28, 29, 34]
-
-    steps:
-      - name: Check out
-        uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-
-      - name: Set up Python 3
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.x"
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v3
-        with:
-          name: ${{ github.sha }}
-          path: out
-
-      - name: AVD test
-        run: |
-          brew install coreutils bash
-          scripts/avd_test.sh ${{ matrix.api }}
