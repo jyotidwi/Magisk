@@ -1,4 +1,4 @@
-name: Magisk Build
+name: Magisk Delta Build
 
 on:
   workflow_dispatch
@@ -58,9 +58,9 @@ jobs:
       - name: Set up NDK
         run: python build.py -v ndk
 
-      - name: Build debug
+      - name: Build Release
         run: |
-          python build.py -v all
+          python build.py -vr all
 
       - name: Stop gradle daemon
         run: ./gradlew --stop
@@ -72,10 +72,3 @@ jobs:
         with:
           name: ${{ github.sha }}
           path: out
-
-      - name: Upload mapping and native debug symbols
-        if: runner.os == 'Linux'
-        uses: actions/upload-artifact@v3
-        with:
-          name: ${{ github.sha }}-symbols
-          path: app/build/outputs
