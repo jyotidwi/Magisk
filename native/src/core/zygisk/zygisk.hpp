@@ -4,21 +4,13 @@
 #include <stdint.h>
 #include <jni.h>
 #include <vector>
-#include <daemon.hpp>
-
-#define MAGISKTMP_ENV  "MAGISKTMP"
-
-#define HIJACK_BIN64   "/system/bin/appwidget"
-#define HIJACK_BIN32   "/system/bin/bu"
+#include <core.hpp>
 
 namespace ZygiskRequest {
 enum : int {
-    SETUP,
     GET_INFO,
-    GET_LOG_PIPE,
     CONNECT_COMPANION,
     GET_MODDIR,
-    PASSTHROUGH,
     END
 };
 }
@@ -28,30 +20,22 @@ enum : int {
 #define ZLOGE(...) LOGE("zygisk64: " __VA_ARGS__)
 #define ZLOGI(...) LOGI("zygisk64: " __VA_ARGS__)
 #define ZLOGW(...) LOGW("zygisk64: " __VA_ARGS__)
-#define HIJACK_BIN HIJACK_BIN64
 #else
 #define ZLOGD(...) LOGD("zygisk32: " __VA_ARGS__)
 #define ZLOGE(...) LOGE("zygisk32: " __VA_ARGS__)
 #define ZLOGI(...) LOGI("zygisk32: " __VA_ARGS__)
 #define ZLOGW(...) LOGW("zygisk32: " __VA_ARGS__)
-#define HIJACK_BIN HIJACK_BIN32
 #endif
 
-// Unmap all pages matching the name
-void unmap_all(const char *name);
-
-// Remap all matching pages with anonymous pages
-void remap_all(const char *name);
-
-// Get library name + offset (from start of ELF), given function address
-uintptr_t get_function_off(int pid, uintptr_t addr, char *lib);
-
-// Get function address, given library name + offset
-uintptr_t get_function_addr(int pid, const char *lib, uintptr_t off);
+// Extreme verbose logging
+#define ZLOGV(...) ZLOGD(__VA_ARGS__)
+//#define ZLOGV(...) (void*)0
 
 extern void *self_handle;
 
 void hook_functions();
+void hookJniNativeMethods(JNIEnv *env, const char *clz, JNINativeMethod *methods, int numMethods);
+
 int remote_get_info(int uid, const char *process, uint32_t *flags, std::vector<int> &fds);
 
 inline int zygisk_request(int req) {
@@ -60,3 +44,19 @@ inline int zygisk_request(int req) {
     write_int(fd, req);
     return fd;
 }
+
+// The reference of the following structs
+// https://cs.android.com/android/platform/superproject/main/+/main:art/libnativebridge/include/nativebridge/native_bridge.h
+
+struct NativeBridgeRuntimeCallbacks {
+    const char* (*getMethodShorty)(JNIEnv* env, jmethodID mid);
+    uint32_t (*getNativeMethodCount)(JNIEnv* env, jclass clazz);
+    uint32_t (*getNativeMethods)(JNIEnv* env, jclass clazz, JNINativeMethod* methods,
+                                 uint32_t method_count);
+};
+
+struct NativeBridgeCallbacks {
+    uint32_t version;
+    void *padding[5];
+    bool (*isCompatibleWith)(uint32_t);
+};

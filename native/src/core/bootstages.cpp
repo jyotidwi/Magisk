@@ -6,13 +6,11 @@
 #include <set>
 #include <string>
 
-#include <magisk.hpp>
+#include <consts.hpp>
 #include <db.hpp>
 #include <base.hpp>
-#include <daemon.hpp>
+#include <core.hpp>
 #include <selinux.hpp>
-
-#include "core.hpp"
 
 using namespace std;
 
@@ -45,21 +43,24 @@ static bool mount_mirror(const std::string_view from, const std::string_view to)
 static void mount_mirrors() {
     LOGI("* Mounting mirrors\n");
     auto self_mount_info = parse_mount_info("self");
+    char path[64];
 
     // Bind remount module root to clear nosuid
     if (access(SECURE_DIR, F_OK) == 0 || SDK_INT < 24) {
-        auto dest = MAGISKTMP + "/" MODULEMNT;
+        ssprintf(path, sizeof(path), "%s/" MODULEMNT, get_magisk_tmp());
         xmkdir(SECURE_DIR, 0700);
         xmkdir(MODULEROOT, 0755);
-        xmkdir(dest.data(), 0755);
-        xmount(MODULEROOT, dest.data(), nullptr, MS_BIND, nullptr);
-        xmount(nullptr, dest.data(), nullptr, MS_REMOUNT | MS_BIND | MS_RDONLY, nullptr);
-        xmount(nullptr, dest.data(), nullptr, MS_PRIVATE, nullptr);
+        xmkdir(path, 0755);
+        xmount(MODULEROOT, path, nullptr, MS_BIND, nullptr);
+        xmount(nullptr, path, nullptr, MS_REMOUNT | MS_BIND | MS_RDONLY, nullptr);
+        xmount(nullptr, path, nullptr, MS_PRIVATE, nullptr);
         chmod(SECURE_DIR, 0700);
     }
 
     // Check and mount preinit mirror
-    if (struct stat st{}; stat((MAGISKTMP + "/" PREINITDEV).data(), &st) == 0 && (st.st_mode & S_IFBLK)) {
+    char dev_path[64];
+    ssprintf(dev_path, sizeof(dev_path), "%s/" PREINITDEV, get_magisk_tmp());
+    if (struct stat st{}; stat(dev_path, &st) == 0 && S_ISBLK(st.st_mode)) {
         // DO NOT mount the block device directly, as we do not know the flags and configs
         // to properly mount the partition; mounting block devices directly as rw could cause
         // crashes if the filesystem driver is crap (e.g. some broken F2FS drivers).
@@ -67,6 +68,7 @@ static void mount_mirrors() {
         // mount point mounting our desired partition, and then bind mount the target folder.
         dev_t preinit_dev = st.st_rdev;
         bool mounted = false;
+        ssprintf(path, sizeof(path), "%s/" PREINITMIRR, get_magisk_tmp());
         for (const auto &info: self_mount_info) {
             if (info.root == "/" && info.device == preinit_dev) {
                 auto flags = split_view(info.fs_option, ",");
@@ -76,29 +78,28 @@ static void mount_mirrors() {
                 if (!rw) continue;
                 string preinit_dir = resolve_preinit_dir(info.target.data());
                 xmkdir(preinit_dir.data(), 0700);
-                auto mirror_dir = MAGISKTMP + "/" PREINITMIRR;
-                if ((mounted = mount_mirror(preinit_dir, mirror_dir))) {
-                    xmount(nullptr, mirror_dir.data(), nullptr, MS_UNBINDABLE, nullptr);
+                if ((mounted = mount_mirror(preinit_dir, path))) {
+                    xmount(nullptr, path, nullptr, MS_UNBINDABLE, nullptr);
                     break;
                 }
             }
         }
         if (!mounted) {
             LOGW("preinit mirror not mounted %u:%u\n", major(preinit_dev), minor(preinit_dev));
-            unlink((MAGISKTMP + "/" PREINITDEV).data());
+            unlink(dev_path);
         }
     }
 
     // Prepare worker
-    auto worker_dir = MAGISKTMP + "/" WORKERDIR;
-    xmount("worker", worker_dir.data(), "tmpfs", 0, "mode=755");
-    xmount(nullptr, worker_dir.data(), nullptr, MS_PRIVATE, nullptr);
+    ssprintf(path, sizeof(path), "%s/" WORKERDIR, get_magisk_tmp());
+    xmount("worker", path, "tmpfs", 0, "mode=755");
+    xmount(nullptr, path, nullptr, MS_PRIVATE, nullptr);
 
     // Recursively bind mount / to mirror dir
-    if (auto mirror_dir = MAGISKTMP + "/" MIRRDIR; !mount_mirror("/", mirror_dir)) {
+    if (auto mirror_dir = get_magisk_tmp() + "/"s MIRRDIR; !mount_mirror("/", mirror_dir)) {
         LOGI("fallback to mount subtree\n");
         // rootfs may fail, fallback to bind mount each mount point
-        set<string, greater<>> mounted_dirs {{ MAGISKTMP }};
+        set<string, greater<>> mounted_dirs {{ get_magisk_tmp() }};
         for (const auto &info: self_mount_info) {
             if (info.type == "rootfs"sv) continue;
             // the greatest mount point that less than info.target, which is possibly a parent
@@ -219,8 +220,6 @@ static bool magisk_env() {
     LOGI("* Initializing Magisk environment\n");
 
     preserve_stub_apk();
-    string pkg;
-    get_manager(0, &pkg);
 
     // Directories in /data/adb
     xmkdir(DATABIN, 0755);
@@ -231,13 +230,13 @@ static bool magisk_env() {
     if (access(DATABIN "/busybox", X_OK))
         return false;
 
-    sprintf(buf, "%s/" BBPATH "/busybox", MAGISKTMP.data());
+    ssprintf(buf, sizeof(buf), "%s/" BBPATH "/busybox", get_magisk_tmp());
     mkdir(dirname(buf), 0755);
     cp_afc(DATABIN "/busybox", buf);
     exec_command_async(buf, "--install", "-s", dirname(buf));
 
     if (access(DATABIN "/magiskpolicy", X_OK) == 0) {
-        sprintf(buf, "%s/magiskpolicy", MAGISKTMP.data());
+        ssprintf(buf, sizeof(buf), "%s/magiskpolicy", get_magisk_tmp());
         cp_afc(DATABIN "/magiskpolicy", buf);
     }
 
@@ -415,6 +414,8 @@ static void boot_complete() {
     // Ensure manager exists
     check_pkg_refresh();
     get_manager(0, nullptr, true);
+
+    reset_zygisk(true);
 }
 
 void boot_stage_handler(int client, int code) {

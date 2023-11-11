@@ -1,9 +1,8 @@
 #pragma once
 
-#include <string>
-
 #define JAVA_PACKAGE_NAME "com.topjohnwu.magisk"
-#define LOGFILE         "/cache/magisk.log"
+#define ZYGISKLDR       "libzygisk.so"
+#define NBPROP          "ro.dalvik.vm.native.bridge"
 #define SECURE_DIR      "/data/adb"
 #define MODULEROOT      SECURE_DIR "/modules"
 #define MODULEUPGRADE   SECURE_DIR "/modules_update"
@@ -11,7 +10,6 @@
 #define MAGISKDB        SECURE_DIR "/magisk.db"
 
 // tmpfs paths
-extern std::string    MAGISKTMP;
 #define INTLROOT      ".magisk"
 #define MIRRDIR       INTLROOT "/mirror"
 #define PREINITMIRR   INTLROOT "/preinit"
@@ -23,10 +21,10 @@ extern std::string    MAGISKTMP;
 #define ROOTOVL       INTLROOT "/rootdir"
 #define SHELLPTS      INTLROOT "/pts"
 #define ROOTMNT       ROOTOVL  "/.mount_list"
-#define ZYGISKBIN     INTLROOT "/zygisk"
 #define SELINUXMOCK   INTLROOT "/selinux"
 #define MAIN_CONFIG   INTLROOT "/config"
 #define MAIN_SOCKET   INTLROOT "/socket"
+#define LOG_PIPE      INTLROOT "/log"
 
 constexpr const char *applet_names[] = { "su", "resetprop", nullptr };
 
@@ -39,6 +37,9 @@ constexpr const char *applet_names[] = { "su", "resetprop", nullptr };
 // Unconstrained file type that anyone can access
 #define SEPOL_FILE_TYPE     "magisk_file"
 #define MAGISK_FILE_CON     "u:object_r:" SEPOL_FILE_TYPE ":s0"
+// Log pipe that only root and zygote can open
+#define SEPOL_LOG_TYPE      "magisk_log_file"
+#define MAGISK_LOG_CON      "u:object_r:" SEPOL_LOG_TYPE ":s0"
 
 extern int SDK_INT;
 #define APP_DATA_DIR (SDK_INT >= 24 ? "/data/user_de" : "/data/user")
@@ -47,5 +48,4 @@ extern int SDK_INT;
 int magisk_main(int argc, char *argv[]);
 int su_client_main(int argc, char *argv[]);
 int resetprop_main(int argc, char *argv[]);
-int app_process_main(int argc, char *argv[]);
 int zygisk_main(int argc, char *argv[]);

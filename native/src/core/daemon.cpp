@@ -3,19 +3,16 @@
 #include <sys/un.h>
 #include <sys/mount.h>
 
-#include <magisk.hpp>
+#include <consts.hpp>
 #include <base.hpp>
-#include <daemon.hpp>
+#include <core.hpp>
 #include <selinux.hpp>
 #include <db.hpp>
 #include <flags.h>
 
-#include "core.hpp"
-
 using namespace std;
 
 int SDK_INT = -1;
-string MAGISKTMP;
 
 bool RECOVERY_MODE = false;
 
@@ -142,10 +139,11 @@ static void handle_request_async(int client, int code, const sock_cred &cred) {
         su_daemon_handler(client, &cred);
         break;
     case MainRequest::ZYGOTE_RESTART:
-        close(client);
         LOGI("** zygote restarted\n");
         pkg_xml_ino = 0;
         prune_su_access();
+        reset_zygisk(false);
+        close(client);
         break;
     case MainRequest::SQLITE_CMD:
         exec_sql(client);
@@ -159,7 +157,6 @@ static void handle_request_async(int client, int code, const sock_cred &cred) {
         break;
     }
     case MainRequest::ZYGISK:
-    case MainRequest::ZYGISK_PASSTHROUGH:
         zygisk_handler(client, &cred);
         break;
     default:
@@ -182,11 +179,24 @@ static void handle_request_sync(int client, int code) {
     case MainRequest::START_DAEMON:
         rust::get_magiskd().setup_logfile();
         break;
-    case MainRequest::STOP_DAEMON:
+    case MainRequest::STOP_DAEMON: {
+        // Unmount all overlays
         denylist_handler(-1, nullptr);
+
+        // Restore native bridge property
+        auto nb = get_prop(NBPROP);
+        auto len = sizeof(ZYGISKLDR) - 1;
+        if (nb == ZYGISKLDR) {
+            set_prop(NBPROP, "0");
+        } else if (nb.size() > len) {
+            set_prop(NBPROP, nb.data() + len);
+        }
+
         write_int(client, 0);
+
         // Terminate the daemon!
         exit(0);
+    }
     default:
         __builtin_unreachable();
     }
@@ -328,9 +338,6 @@ static void daemon_entry() {
     }
 
     // Get self stat
-    char buf[64];
-    xreadlink("/proc/self/exe", buf, sizeof(buf));
-    MAGISKTMP = dirname(buf);
     xstat("/proc/self/exe", &self_st);
 
     // Get API level
@@ -353,9 +360,11 @@ static void daemon_entry() {
     restore_tmpcon();
 
     // Cleanups
-    auto mount_list = MAGISKTMP + "/" ROOTMNT;
-    if (access(mount_list.data(), F_OK) == 0) {
-        file_readline(true, mount_list.data(), [](string_view line) -> bool {
+    const char *tmp = get_magisk_tmp();
+    char path[64];
+    ssprintf(path, sizeof(path), "%s/" ROOTMNT, tmp);
+    if (access(path, F_OK) == 0) {
+        file_readline(true, path, [](string_view line) -> bool {
             umount2(line.data(), MNT_DETACH);
             return true;
         });
@@ -364,11 +373,12 @@ static void daemon_entry() {
         xmount(nullptr, "/", nullptr, MS_REMOUNT | MS_RDONLY, nullptr);
         unsetenv("REMOUNT_ROOT");
     }
-    rm_rf((MAGISKTMP + "/" ROOTOVL).data());
+    ssprintf(path, sizeof(path), "%s/" ROOTOVL, tmp);
+    rm_rf(path);
 
     // Load config status
-    auto config = MAGISKTMP + "/" MAIN_CONFIG;
-    parse_prop_file(config.data(), [](auto key, auto val) -> bool {
+    ssprintf(path, sizeof(path), "%s/" MAIN_CONFIG, tmp);
+    parse_prop_file(path, [](auto key, auto val) -> bool {
         if (key == "RECOVERYMODE" && val == "true")
             RECOVERY_MODE = true;
         return true;
@@ -376,22 +386,22 @@ static void daemon_entry() {
 
     // Use isolated devpts if kernel support
     if (access("/dev/pts/ptmx", F_OK) == 0) {
-        auto pts = MAGISKTMP + "/" SHELLPTS;
-        if (access(pts.data(), F_OK)) {
-            xmkdirs(pts.data(), 0755);
-            xmount("devpts", pts.data(), "devpts",
-                   MS_NOSUID | MS_NOEXEC, "newinstance");
-            auto ptmx = pts + "/ptmx";
-            if (access(ptmx.data(), F_OK)) {
-                xumount(pts.data());
-                rmdir(pts.data());
+        ssprintf(path, sizeof(path), "%s/" SHELLPTS, tmp);
+        if (access(path, F_OK)) {
+            xmkdirs(path, 0755);
+            xmount("devpts", path, "devpts", MS_NOSUID | MS_NOEXEC, "newinstance");
+            char ptmx[64];
+            ssprintf(ptmx, sizeof(ptmx), "%s/ptmx", path);
+            if (access(ptmx, F_OK)) {
+                xumount(path);
+                rmdir(path);
             }
         }
     }
 
     fd = xsocket(AF_LOCAL, SOCK_STREAM | SOCK_CLOEXEC, 0);
     sockaddr_un addr = {.sun_family = AF_LOCAL};
-    strcpy(addr.sun_path, (MAGISKTMP + "/" MAIN_SOCKET).data());
+    ssprintf(addr.sun_path, sizeof(addr.sun_path), "%s/" MAIN_SOCKET, tmp);
     unlink(addr.sun_path);
     if (xbind(fd, (sockaddr *) &addr, sizeof(addr)))
         exit(1);
@@ -411,27 +421,25 @@ static void daemon_entry() {
     poll_loop();
 }
 
-string find_magisk_tmp() {
-    if (access("/debug_ramdisk/" INTLROOT, F_OK) == 0) {
-        return "/debug_ramdisk";
-    }
-    if (access("/sbin/" INTLROOT, F_OK) == 0) {
-        return "/sbin";
-    }
-    // Fallback to lookup from mountinfo for manual mount, e.g. avd
-    for (const auto &mount: parse_mount_info("self")) {
-        if (mount.source == "magisk" && mount.root == "/") {
-            return mount.target;
+const char *get_magisk_tmp() {
+    static const char *path = nullptr;
+    if (path == nullptr) {
+        if (access("/debug_ramdisk/" INTLROOT, F_OK) == 0) {
+            path = "/debug_ramdisk";
+        } else if (access("/sbin/" INTLROOT, F_OK) == 0) {
+            path = "/sbin";
+        } else {
+            path = "";
         }
     }
-    return "";
+    return path;
 }
 
 int connect_daemon(int req, bool create) {
     int fd = xsocket(AF_LOCAL, SOCK_STREAM | SOCK_CLOEXEC, 0);
     sockaddr_un addr = {.sun_family = AF_LOCAL};
-    string tmp = find_magisk_tmp();
-    strcpy(addr.sun_path, (tmp + "/" MAIN_SOCKET).data());
+    const char *tmp = get_magisk_tmp();
+    ssprintf(addr.sun_path, sizeof(addr.sun_path), "%s/" MAIN_SOCKET, tmp);
     if (connect(fd, (sockaddr *) &addr, sizeof(addr))) {
         if (!create || getuid() != AID_ROOT) {
             LOGE("No daemon is currently running!\n");
@@ -441,7 +449,7 @@ int connect_daemon(int req, bool create) {
 
         char buf[64];
         xreadlink("/proc/self/exe", buf, sizeof(buf));
-        if (tmp.empty() || !str_starts(buf, tmp)) {
+        if (tmp[0] == '\0' || !str_starts(buf, tmp)) {
             LOGE("Start daemon on magisk tmpfs\n");
             close(fd);
             return -1;

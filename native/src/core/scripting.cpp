@@ -2,12 +2,10 @@
 #include <vector>
 #include <sys/wait.h>
 
-#include <magisk.hpp>
+#include <consts.hpp>
 #include <base.hpp>
 #include <selinux.hpp>
-#include <daemon.hpp>
-
-#include "core.hpp"
+#include <core.hpp>
 
 using namespace std;
 
@@ -15,15 +13,17 @@ using namespace std;
 
 static const char *bbpath() {
     static string path;
-    if (path.empty())
-        path = MAGISKTMP + "/" BBPATH "/busybox";
+    if (path.empty()) {
+        path = get_magisk_tmp();
+        path += "/" BBPATH "/busybox";
+    }
     return path.data();
 }
 
 static void set_script_env() {
     setenv("ASH_STANDALONE", "1", 1);
     char new_path[4096];
-    sprintf(new_path, "%s:%s", getenv("PATH"), MAGISKTMP.data());
+    ssprintf(new_path, sizeof(new_path), "%s:%s", getenv("PATH"), get_magisk_tmp());
     setenv("PATH", new_path, 1);
     if (zygisk_enabled)
         setenv("ZYGISK_ENABLED", "1", 1);

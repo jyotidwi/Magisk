@@ -6,90 +6,44 @@
 #include <android/dlext.h>
 
 #include <base.hpp>
-#include <daemon.hpp>
-#include <magisk.hpp>
-#include <selinux.hpp>
+#include <consts.hpp>
 
 #include "zygisk.hpp"
 #include "module.hpp"
-#include "deny/deny.hpp"
 
 using namespace std;
 
 void *self_handle = nullptr;
 
-// Make sure /proc/self/environ is sanitized
-// Filter env and reset MM_ENV_END
-static void sanitize_environ() {
-    char *cur = environ[0];
-
-    for (int i = 0; environ[i]; ++i) {
-        // Copy all env onto the original stack
-        size_t len = strlen(environ[i]);
-        memmove(cur, environ[i], len + 1);
-        environ[i] = cur;
-        cur += len + 1;
-    }
-
-    prctl(PR_SET_MM, PR_SET_MM_ENV_END, cur, 0, 0);
-}
-
-extern "C" void unload_first_stage() {
-    ZLOGD("unloading first stage\n");
-    unmap_all(HIJACK_BIN);
-    xumount2(HIJACK_BIN, MNT_DETACH);
-}
-
-extern "C" void zygisk_inject_entry(void *handle) {
-    rust::zygisk_entry();
-    ZLOGD("load success\n");
-
-    char *ld = getenv("LD_PRELOAD");
-    if (char *c = strrchr(ld, ':')) {
-        *c = '\0';
-        setenv("LD_PRELOAD", ld, 1);  // Restore original LD_PRELOAD
-    } else {
-        unsetenv("LD_PRELOAD");
-    }
-
-    MAGISKTMP = getenv(MAGISKTMP_ENV);
+extern "C" [[maybe_unused]] void zygisk_inject_entry(void *handle) {
     self_handle = handle;
-
-    unsetenv(MAGISKTMP_ENV);
-    sanitize_environ();
+    zygisk_logging();
     hook_functions();
+    ZLOGD("load success\n");
 }
+
+static bool is_compatible_with(uint32_t) {
+    auto name = get_prop(NBPROP);
+    android_dlextinfo info = {
+        .flags = ANDROID_DLEXT_FORCE_LOAD
+    };
+    void *handle = android_dlopen_ext(name.data(), RTLD_LAZY, &info);
+    if (handle) {
+        auto entry = reinterpret_cast<void (*)(void *)>(dlsym(handle, "zygisk_inject_entry"));
+        if (entry) {
+            entry(handle);
+        }
+    }
+    return false;
+}
+
+extern "C" [[maybe_unused]] NativeBridgeCallbacks NativeBridgeItf{
+    .version = 2,
+    .padding = {},
+    .isCompatibleWith = &is_compatible_with,
+};
 
 // The following code runs in zygote/app process
-
-extern "C" int zygisk_fetch_logd() {
-    // If we don't have the log pipe set, request magiskd for it. This could actually happen
-    // multiple times in the zygote daemon (parent process) because we had to close this
-    // file descriptor to prevent crashing.
-    //
-    // For some reason, zygote sanitizes and checks FDs *before* forking. This results in the fact
-    // that *every* time before zygote forks, it has to close all logging related FDs in order
-    // to pass FD checks, just to have it re-initialized immediately after any
-    // logging happens ¯\_(ツ)_/¯.
-    //
-    // To be consistent with this behavior, we also have to close the log pipe to magiskd
-    // to make zygote NOT crash if necessary. For nativeForkAndSpecialize, we can actually
-    // add this FD into fds_to_ignore to pass the check. For other cases, we accomplish this by
-    // hooking __android_log_close and closing it at the same time as the rest of logging FDs.
-
-    if (int fd = zygisk_request(ZygiskRequest::GET_LOG_PIPE); fd >= 0) {
-        int log_pipe = -1;
-        if (read_int(fd) == 0) {
-            log_pipe = recv_fd(fd);
-        }
-        close(fd);
-        if (log_pipe >= 0) {
-            return log_pipe;
-        }
-    }
-
-    return -1;
-}
 
 static inline bool should_load_modules(uint32_t flags) {
     return (flags & UNMOUNT_MASK) != UNMOUNT_MASK &&
@@ -157,12 +111,13 @@ static void connect_companion(int client, bool is_64_bit) {
         socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds);
         zygiskd_socket = fds[0];
         if (fork_dont_care() == 0) {
-            string exe = MAGISKTMP + "/magisk" + (is_64_bit ? "64" : "32");
+            char exe[64];
+            ssprintf(exe, sizeof(exe), "%s/magisk%s", get_magisk_tmp(), (is_64_bit ? "64" : "32"));
             // This fd has to survive exec
             fcntl(fds[1], F_SETFD, 0);
             char buf[16];
             ssprintf(buf, sizeof(buf), "%d", fds[1]);
-            execl(exe.data(), "", "zygisk", "companion", buf, (char *) nullptr);
+            execl(exe, "", "zygisk", "companion", buf, (char *) nullptr);
             exit(-1);
         }
         close(fds[1]);
@@ -175,89 +130,6 @@ static void connect_companion(int client, bool is_64_bit) {
         }
     }
     send_fd(zygiskd_socket, client);
-}
-
-static timespec last_zygote_start;
-static int zygote_start_counts[] = { 0, 0 };
-#define zygote_start_count zygote_start_counts[is_64_bit]
-#define zygote_started (zygote_start_counts[0] + zygote_start_counts[1])
-#define zygote_start_reset(val) { zygote_start_counts[0] = val; zygote_start_counts[1] = val; }
-
-static void setup_files(int client, const sock_cred *cred) {
-    LOGD("zygisk: setup files for pid=[%d]\n", cred->pid);
-
-    char buf[4096];
-    if (!get_exe(cred->pid, buf, sizeof(buf))) {
-        write_int(client, 1);
-        return;
-    }
-
-    // Hijack some binary in /system/bin to host loader
-    const char *hbin;
-    string mbin;
-    int app_fd;
-    bool is_64_bit = str_ends(buf, "64");
-    if (is_64_bit) {
-        hbin = HIJACK_BIN64;
-        mbin = MAGISKTMP + "/" ZYGISKBIN "/loader64.so";
-        app_fd = app_process_64;
-    } else {
-        hbin = HIJACK_BIN32;
-        mbin = MAGISKTMP + "/" ZYGISKBIN "/loader32.so";
-        app_fd = app_process_32;
-    }
-
-    if (!zygote_started) {
-        // First zygote launch, record time
-        clock_gettime(CLOCK_MONOTONIC, &last_zygote_start);
-    }
-
-    if (zygote_start_count) {
-        // This zygote ABI had started before, kill existing zygiskd
-        close(zygiskd_sockets[0]);
-        close(zygiskd_sockets[1]);
-        zygiskd_sockets[0] = -1;
-        zygiskd_sockets[1] = -1;
-        xumount2(hbin, MNT_DETACH);
-    }
-    ++zygote_start_count;
-
-    if (zygote_start_count >= 5) {
-        // Bootloop prevention
-        timespec ts;
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        if (ts.tv_sec - last_zygote_start.tv_sec > 60) {
-            // This is very likely manual soft reboot
-            memcpy(&last_zygote_start, &ts, sizeof(ts));
-            zygote_start_reset(1);
-        } else {
-            // If any zygote relaunched more than 5 times within a minute,
-            // don't do any setups further to prevent bootloop.
-            zygote_start_reset(999);
-            write_int(client, 1);
-            return;
-        }
-    }
-
-    // Ack
-    write_int(client, 0);
-
-    // Receive and bind mount loader
-    int ld_fd = xopen(mbin.data(), O_WRONLY | O_TRUNC | O_CREAT | O_CLOEXEC, 0755);
-    string ld_data = read_string(client);
-    xwrite(ld_fd, ld_data.data(), ld_data.size());
-    close(ld_fd);
-    setfilecon(mbin.data(), MAGISK_FILE_CON);
-    xmount(mbin.data(), hbin, nullptr, MS_BIND, nullptr);
-
-    send_fd(client, app_fd);
-    write_string(client, MAGISKTMP);
-}
-
-static void magiskd_passthrough(int client) {
-    bool is_64_bit = read_int(client);
-    write_int(client, 0);
-    send_fd(client, is_64_bit ? app_process_64 : app_process_32);
 }
 
 extern bool uid_granted_root(int uid);
@@ -320,16 +192,6 @@ static void get_process_info(int client, const sock_cred *cred) {
     }
 }
 
-static void send_log_pipe(int fd) {
-    int logd_fd = rust::get_magiskd().get_log_pipe();
-    if (logd_fd >= 0) {
-        write_int(fd, 0);
-        send_fd(fd, logd_fd);
-    } else {
-        write_int(fd, 1);
-    }
-}
-
 static void get_moddir(int client) {
     int id = read_int(client);
     char buf[4096];
@@ -343,17 +205,8 @@ void zygisk_handler(int client, const sock_cred *cred) {
     int code = read_int(client);
     char buf[256];
     switch (code) {
-    case ZygiskRequest::SETUP:
-        setup_files(client, cred);
-        break;
-    case ZygiskRequest::PASSTHROUGH:
-        magiskd_passthrough(client);
-        break;
     case ZygiskRequest::GET_INFO:
         get_process_info(client, cred);
-        break;
-    case ZygiskRequest::GET_LOG_PIPE:
-        send_log_pipe(client);
         break;
     case ZygiskRequest::CONNECT_COMPANION:
         if (get_exe(cred->pid, buf, sizeof(buf))) {

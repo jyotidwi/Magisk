@@ -1,10 +1,8 @@
 #include <base.hpp>
-#include <magisk.hpp>
-#include <daemon.hpp>
+#include <consts.hpp>
+#include <core.hpp>
 #include <db.hpp>
 #include <flags.h>
-
-#include "core.hpp"
 
 using namespace std;
 using rust::Vec;
@@ -73,7 +71,7 @@ vector<bool> get_app_no_list() {
 
 void preserve_stub_apk() {
     mutex_guard g(pkg_lock);
-    string stub_path = MAGISKTMP + "/stub.apk";
+    string stub_path = get_magisk_tmp() + "/stub.apk"s;
     stub_apk_fd = xopen(stub_path.data(), O_RDONLY | O_CLOEXEC);
     unlink(stub_path.data());
     auto cert = read_certificate(stub_apk_fd, -1);
